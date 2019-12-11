@@ -36,6 +36,7 @@ TESTS = [
     'jit',
     'logging',
     'mkldnn',
+    'mkldnn_conv2d_ext',
     'multiprocessing',
     'multiprocessing_spawn',
     'nccl',
