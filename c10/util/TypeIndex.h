@@ -81,7 +81,7 @@ inline C10_TYPENAME_CONSTEXPR string_view fully_qualified_type_name_impl() noexc
 }
 
 template <typename T>
-inline constexpr uint64_t type_index_impl() {
+inline C10_HOST_CONSTEXPR uint64_t type_index_impl() {
 #if !defined(__CUDA_ARCH__)
 // Idea: __PRETTY_FUNCTION__ (or __FUNCSIG__ on msvc) contains a qualified name
 // of this function, including its template parameter, i.e. including the
@@ -102,7 +102,7 @@ inline constexpr uint64_t type_index_impl() {
 } // namespace detail
 
 template <typename T>
-inline constexpr type_index get_type_index() noexcept {
+inline C10_HOST_CONSTEXPR type_index get_type_index() noexcept {
 #if !defined(__CUDA_ARCH__)
   // To enforce that this is really computed at compile time, we pass the
   // type index through std::integral_constant.
