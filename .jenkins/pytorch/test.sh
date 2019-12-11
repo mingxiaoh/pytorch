@@ -10,7 +10,7 @@ COMPACT_JOB_NAME="${BUILD_ENVIRONMENT}"
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 echo "Testing pytorch"
-pip install chainer
+pip_install --user chainer
 
 if [ -n "${IN_CIRCLECI}" ]; then
   # TODO move this to docker
