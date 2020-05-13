@@ -11432,7 +11432,7 @@ class TestConv2dExt(TestCase):
                                 isize, g, bs, ic, oc, has_bias, p, d, s, k)
                     )
                 except AssertionError as e:
-                    print(e)
+                    print('cuda not equal to thnn,', e)
 
         def _test_conv2d_mkldnn_vs_thnn(g, bs, isize, ic_g, oc_g, has_bias, p, d, s, k):
             ic, oc = ic_g * g, oc_g * g
@@ -11476,8 +11476,7 @@ class TestConv2dExt(TestCase):
                                 isize, g, bs, ic, oc, has_bias, p, d, s, k)
                     )
                 except AssertionError as e:
-                    print(e)
-
+                    print('cudnn not equal to thnn,', e)
 
         count = 0
         for case in [test_case1, test_case2, test_case3]:
