@@ -69,7 +69,44 @@ NO_HALF_TENSORTYPES = [torch.float,
 
 DOUBLE_TENSORTYPES = [torch.double]
 
+test_case1 = [
+    ['group', [1, 2, 6]],
+    ['bs', [2]],
+    ['input_channels', [1, 16, 30, 32, 33, 64]],
+    ['output_channels', [1, 16, 17]],
+    ['paddings', [[0, 0], [1, 1]]],
+    ['dilations', [[1, 1], [2, 2]]],
+    ['strides', [[1, 1], [2, 2]]],
+    ['kernels', [[1, 1], [2, 2], [3, 3], [5, 5], [7, 7]]],
+    ['output_sizes', [[1, 1]]],
+    ['bias', [True, False]],
+]
 
+test_case2 = [
+    ['group', [2]],
+    ['bs', [1, 4, 16, 64]],
+    ['input_channels', [3]],
+    ['output_channels', [3]],
+    ['paddings', [[1, 1]]],
+    ['dilations', [[1, 1]]],
+    ['strides', [[1, 1]]],
+    ['kernels', [[3, 3]]],
+    ['output_sizes', [[2, 2]]],
+    ['bias' , [True, False]],
+]
+
+test_case3 = [
+    ['group', [6]],
+    ['bs', [2]],
+    ['input_channels', [3]],
+    ['output_channels', [3]],
+    ['paddings', [[1, 1]]],
+    ['dilations', [[1, 1]]],
+    ['strides', [[1, 1]]],
+    ['kernels', [[3, 3]]],
+    ['output_sizes', [[1, 1], [2, 2], [3, 3], [5, 5], [6, 6], [7, 7], [16, 16], [17, 17], [32, 32], [33, 33], [64, 64], [128, 128]]],
+    ['bias' , [True, False]],
+]
 # WARNING: If you add a new top-level test case to this file, you MUST
 # update test/run_test.py to list it, otherwise it will NOT be run in
 # CI.
@@ -11324,6 +11361,151 @@ class TestNNDeviceType(NNTestCase):
             x = torch.randn(shape, device=device, requires_grad=True)
             F.max_pool3d(x, kernel_size=(1, 1, 1)).sum().backward()
             self.assertTrue(torch.allclose(x.grad, torch.ones_like(x.grad)))
+
+
+class TestConv2dExt(TestCase):
+    def test_conv2d_ext(self):
+        def subtensor(tensor, dim, groups, g):
+            if tensor is None:
+                return None
+            group_size = int(tensor.size(dim) / group)
+            return tensor.narrow(dim, group_size * g, group_size).contiguous()
+
+        def thnn_conv(input, weight, k, bias, s, p, d):
+            if d[0] > 1 or d[1] > 1:
+                return torch._C._nn.slow_conv_dilated2d(input, weight, k, bias, s, p, d)
+            else:
+                return torch._C._nn.thnn_conv2d(input, weight, k, bias, s, p)
+
+        def thnn_conv_group(input, weight, k, bias, s, p, d, group):
+            if group == 1:
+                return thnn_conv(input, weight, k, bias, s, p, d)
+            else:
+                outputs = []
+                for g in range(group):
+                    input_g = subtensor(input, 1, group, g)
+                    weight_g = subtensor(weight, 0, group, g)
+                    bias_g = subtensor(bias, 0, group, g)
+                    outputs.append(thnn_conv(input_g, weight_g, k, bias_g, s, p, d))
+                return torch.cat(outputs, 1)
+
+        def _test_conv2d_cpu_vs_thnn(g, bs, isize, ic_g, oc_g, has_bias, p, d, s, k):
+            ic, oc = ic_g * g, oc_g * g
+            torch.manual_seed(1)
+            input = torch.randn((bs, ic, isize[0], isize[1]), dtype=torch.float32, requires_grad=True)
+            torch.manual_seed(2)
+            weight = torch.randn((oc, ic_g, k[0], k[1]), dtype=torch.float32) * 0.01
+            torch.manual_seed(3)
+            bias = None if has_bias else torch.randn((oc), dtype=torch.float32)
+            # do forward
+            # thnn vs cpu
+            cpu_output = torch.conv2d(input, weight, bias, s, p, d, g)
+            thnn_output = thnn_conv_group(input, weight, k, bias, s, p, d, g)
+            self.assertEqual(
+                cpu_output,
+                thnn_output,
+                message='input size:{}; group:{}; batchsize:{}, input channel:{}; output channel:{};'
+                        'bias:{}, padding:{}, dilation:{}; stride:{}; kernel:{}'.format(isize, g, bs, ic, oc, has_bias, p, d, s, k)
+            )
+
+        def _test_conv2d_cuda_vs_thnn(g, bs, isize, ic_g, oc_g, has_bias, p, d, s, k):
+            ic, oc = ic_g * g, oc_g * g
+            # do forward
+            # thnn vs cuda
+            for dtype in [torch.half, torch.float, torch.double]:
+                torch.manual_seed(1)
+                input = torch.randn((bs, ic, isize[0], isize[1]), device='cuda', dtype=dtype, requires_grad=True)
+                torch.manual_seed(2)
+                weight = torch.randn((oc, ic_g, k[0], k[1]), device='cuda', dtype=dtype) * 0.01
+                torch.manual_seed(3)
+                bias = None if has_bias else torch.randn((oc), device='cuda', dtype=dtype)
+
+                cuda_output = torch.conv2d(input, weight, bias, s, p, d, g)
+                thnn_output = thnn_conv_group(input, weight, k, bias, s, p, d, g)
+                try:
+                    self.assertEqual(
+                        cuda_output,
+                        thnn_output,
+                        message='input size:{}; group:{}; batchsize:{}, input channel:{}; output channel:{};'
+                                'bias:{}, padding:{}, dilation:{}; stride:{}; kernel:{}'.format(isize, g, bs, ic, oc, has_bias, p, d, s, k)
+                    )
+                except AssertionError as e:
+                    print('cuda not equal to thnn,', e)
+
+        def _test_conv2d_mkldnn_vs_thnn(g, bs, isize, ic_g, oc_g, has_bias, p, d, s, k):
+            ic, oc = ic_g * g, oc_g * g
+            # thnn vs mkldnn
+            torch.manual_seed(1)
+            input = torch.randn((bs, ic, isize[0], isize[1]), dtype=torch.float32, requires_grad=True)
+            torch.manual_seed(2)
+            weight = torch.randn((oc, ic_g, k[0], k[1]), dtype=torch.float32) * 0.01
+            torch.manual_seed(3)
+            bias = None if has_bias else torch.randn((oc), dtype=torch.float32)
+
+            thnn_output = thnn_conv_group(input, weight, k, bias, s, p, d, g)
+            mkldnn_output = torch.mkldnn_convolution(input, weight, bias, p, s, d, g)
+            self.assertEqual(
+                thnn_output,
+                mkldnn_output,
+                message='input size:{}; group:{}; batchsize:{}, input channel:{}; output channel:{};'
+                        'bias:{}, padding:{}, dilation:{}; stride:{}; kernel:{}'.format(isize, g, bs, ic, oc, has_bias, p, d, s, k)
+            )
+
+        def _test_conv2d_cudnn_vs_thnn(g, bs, isize, ic_g, oc_g, has_bias, p, d, s, k):
+            ic, oc = ic_g * g, oc_g * g
+            # thnn vs cudnn
+            for dtype in [torch.half, torch.float, torch.double]:
+                torch.manual_seed(1)
+                input = torch.randn((bs, ic, isize[0], isize[1]), device='cuda', dtype=dtype, requires_grad=True)
+                torch.manual_seed(2)
+                weight = torch.randn((oc, ic_g, k[0], k[1]), device='cuda', dtype=dtype) * 0.01
+                torch.manual_seed(3)
+                bias = None if has_bias else torch.randn((oc), device='cuda', dtype=dtype)
+
+                thnn_output = thnn_conv_group(input, weight, k, bias, s, p, d, g)
+                cudnn_output = torch.cudnn_convolution(input, weight, bias, p, s, d, g, True, True)
+                try:
+                    self.assertEqual(
+                        thnn_output,
+                        cudnn_output,
+                        message='input size:{}; group:{}; batchsize:{}, input channel:{}; output channel:{};'
+                                'bias:{}, padding:{}, dilation:{}; stride:{}; kernel:{}'.format(isize, g, bs, ic, oc, has_bias, p, d, s, k)
+                    )
+                except AssertionError as e:
+                    print('cudnn not equal to thnn,', e)
+
+        count = 0
+        for case in [test_case1, test_case2, test_case3]:
+            case_combinations = list(product(*map(lambda x: x[1], case)))
+
+            for combination in case_combinations:
+                group = combination[0]
+                bs = combination[1]
+                ic = combination[2]
+                oc = combination[3]
+                p = combination[4]
+                d = combination[5]
+                s = combination[6]
+                k = combination[7]
+                osize = combination[8]
+                bias = combination[9]
+
+                count += 1
+                isize = []
+                for i in range(len(osize)):
+                    isize.append(s[i] * (osize[i] - 1) + 1 + d[i] * (k[i] - 1) - 2 * p[i])
+
+                if isize[0] > 0 and isize[1] > 0:
+                    _test_conv2d_cpu_vs_thnn(group, bs, isize, ic, oc, bias, p, d, s, k)
+                    if torch.backends.mkldnn.is_available():
+                        _test_conv2d_mkldnn_vs_thnn(group, bs, isize, ic, oc, bias, p, d, s, k)
+                    if torch.cuda.is_available():
+                        _test_conv2d_cuda_vs_thnn(group, bs, isize, ic, oc, bias, p, d, s, k)
+                    if torch.backends.cudnn.is_available():
+                        _test_conv2d_cudnn_vs_thnn(group, bs, isize, ic, oc, bias, p, d, s, k)
+                else:
+                    warnings.warn(UserWarning("config error, skip..."))
+        print('case count:', count) 
 
 
 instantiate_device_type_tests(TestNNDeviceType, globals())
